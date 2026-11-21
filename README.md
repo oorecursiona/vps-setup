@@ -1,24 +1,33 @@
 # vps-setup
 
-新 VPS 的初始化脚本。
+新 VPS 的初始化脚本，分成两个独立脚本，按需运行：
 
-## 需求
+| 脚本 | 作用 |
+| --- | --- |
+| [`init-ssh-zsh.sh`](init-ssh-zsh.sh) | 录入 SSH 公钥并禁用密码登录；安装 zsh、oh-my-zsh 和 zsh-autosuggestions |
+| [`tune-network.sh`](tune-network.sh) | 开启 BBR，并调整 TCP 参数以提高网速 |
+
+两个脚本都需要 root 权限，都可以重复执行。
+
+## init-ssh-zsh.sh：SSH 加固与 zsh
+
+### 需求
 
 1. 录入 SSH 公钥，并在**确认可以用密钥登录之后**，禁用 SSH 密码登录。
 2. 安装 [zsh](https://www.zsh.org/)、[oh-my-zsh](https://ohmyz.sh/) 和 [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)，并把 zsh 设为默认 shell。
 
-## 用法
+### 用法
 
 把脚本传到 VPS 上：
 
 ```bash
-scp setup.sh <user>@<VPS_IP>:
+scp init-ssh-zsh.sh <user>@<VPS_IP>:
 ```
 
-运行时要加 `-t`，脚本需要交互输入。脚本需要 root 权限，普通用户用 sudo 运行；公钥和 zsh 会配置给调用 sudo 的那个用户（`<user>`）：
+运行时要加 `-t`，脚本需要交互输入。普通用户用 sudo 运行，公钥和 zsh 会配置给调用 sudo 的那个用户（`<user>`）：
 
 ```bash
-ssh -t <user>@<VPS_IP> sudo bash setup.sh
+ssh -t <user>@<VPS_IP> sudo bash init-ssh-zsh.sh
 ```
 
 如果直接以 root 登录，就把 `<user>` 换成 `root`，并去掉 `sudo`。此时公钥和 zsh 配置给 root。
@@ -44,9 +53,59 @@ ssh -t <user>@<VPS_IP> sudo bash setup.sh
 
 完成后重新登录，就会进入 zsh。
 
-## 说明
+### 说明
 
 - **禁用密码登录的方式**：如果 `sshd_config` 里有 `Include sshd_config.d/*`（较新的 Debian/Ubuntu 都有），就写入 `/etc/ssh/sshd_config.d/00-disable-password.conf`。`00-` 前缀保证它排在 cloud-init 生成的 `50-cloud-init.conf` 之前；由于 sshd 对同一选项取第一次出现的值，这样能覆盖掉后者常带的 `PasswordAuthentication yes`。如果没有 Include，就直接修改 `sshd_config`，并先备份为 `sshd_config.bak.<时间戳>`。
 - **安全措施**：写入后先用 `sshd -t` 校验，失败则自动回滚；然后用 `sshd -T` 确认实际生效的值，最后才重新加载 sshd。
+- **home 目录权限**：如果 home 目录对组或其他用户可写，sshd 默认会拒绝公钥登录，脚本会自动去掉这些写权限。
 - **可重复执行**：已完成的步骤会自动跳过，包括已存在的公钥、已禁用的密码登录、已安装的 oh-my-zsh 和插件。
 - **支持的发行版**：使用 apt、dnf、yum、pacman 或 apk 作为包管理器的发行版。目前只在 Debian 12 和 Ubuntu 24.04 容器中实际测试过。
+
+## tune-network.sh：网络调优
+
+### 需求
+
+提高 VPS 的网络吞吐，尤其是跨境这类高延迟、有丢包的链路。
+
+### 用法
+
+不需要交互，所以不用加 `-t`：
+
+```bash
+scp tune-network.sh <user>@<VPS_IP>:
+```
+
+```bash
+ssh <user>@<VPS_IP> sudo bash tune-network.sh
+```
+
+脚本会打印每个参数调整前后的值。全部生效时以 0 退出；有参数没生效时会在表中标出，并以 1 退出。
+
+确认 BBR 已开启（输出 `bbr` 即可）：
+
+```bash
+sysctl net.ipv4.tcp_congestion_control
+```
+
+### 调整的参数
+
+配置写入 `/etc/sysctl.d/99-network-tuning.conf`，重启后依然有效。
+
+| 参数 | 值 | 作用 |
+| --- | --- | --- |
+| `net.ipv4.tcp_congestion_control` | `bbr` | 按测出的带宽和延迟控制发送速度，不会像默认的 cubic 那样一丢包就大幅降速；在高延迟、有丢包的链路上提升最明显 |
+| `net.core.default_qdisc` | `fq` | 配合 BBR 的队列算法 |
+| `net.core.rmem_max` / `wmem_max` | 64 MB | 允许的最大 socket 缓冲区 |
+| `net.ipv4.tcp_rmem` / `tcp_wmem` | 最大 64 MB | 单连接吞吐上限约为"缓冲区 ÷ 往返延迟"；默认最大只有 4–6 MB，200ms 延迟下单连接只能跑到约 200 Mbps |
+| `net.ipv4.tcp_slow_start_after_idle` | `0` | 连接空闲后不重新慢启动，长连接更快恢复速度 |
+| `net.ipv4.tcp_mtu_probing` | `1` | 自动探测 MTU，避免链路上有设备丢弃大包导致连接卡住 |
+| `net.ipv4.tcp_fastopen` | `3` | 握手时就能带数据，减少一次往返 |
+| `net.ipv4.tcp_notsent_lowat` | `16384` | 减少发送队列里的积压，降低交互延迟 |
+
+### 说明
+
+- **内核要求**：需要内核 4.9 及以上，并且编译了 BBR。Debian 10+、Ubuntu 18.04+ 都满足。不满足时脚本会报错退出，不做任何修改。
+- **容器化 VPS**：OpenVZ、LXC 这类 VPS 和宿主机共享内核，通常改不了这些参数，BBR 只能由服务商在宿主机上开启。脚本检测到这种环境时会给出提示。
+- **生效时机**：立即生效，不需要重启。已建立的连接仍使用旧算法，新建立的连接使用 BBR。
+- **撤销**：删除 `/etc/sysctl.d/99-network-tuning.conf` 和 `/etc/modules-load.d/bbr.conf`，然后重启。
+- **配置调不了的部分**：从国内访问时，影响最大的是回程线路（CN2 GIA、CMI、联通 9929/4837 等）。可以用 `mtr` 或 `nexttrace` 看路由和丢包，用 `iperf3` 测实际吞吐，判断瓶颈在线路还是在参数。

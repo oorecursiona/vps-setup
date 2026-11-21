@@ -5,8 +5,8 @@
 #   2. 安装 zsh、oh-my-zsh、zsh-autosuggestions，并把 zsh 设为默认 shell
 #
 # 用法（在本地执行，需要 -t 以便交互）：
-#   scp setup.sh <user>@<VPS_IP>:
-#   ssh -t <user>@<VPS_IP> sudo bash setup.sh
+#   scp init-ssh-zsh.sh <user>@<VPS_IP>:
+#   ssh -t <user>@<VPS_IP> sudo bash init-ssh-zsh.sh
 #
 # 公钥和 zsh 配置给调用 sudo 的那个用户；直接以 root 登录则去掉 sudo，配置给 root。
 # 可重复执行：已完成的步骤会自动跳过。
